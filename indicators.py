@@ -77,6 +77,25 @@ def stochastic(highs, lows, closes, n: int = 14, k: int = 3, d: int = 3):
     return slow_k, slow_d
 
 
+def obv(closes: Series, volumes: Series, signal: int = 9):
+    """OBV(On Balance Volume): 오른 날 거래량은 더하고 내린 날은 뺀 누적값 + 시그널선(EMA)
+
+    가격보다 거래량이 먼저 움직인다는 가정. OBV가 오르는데 가격이 횡보하면 매집, 반대면 분산으로 본다.
+    """
+    out: Series = [None] * len(closes)
+    if not closes:
+        return out, out
+    total = 0.0
+    out[0] = total
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i - 1]:
+            total += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            total -= volumes[i]
+        out[i] = total
+    return out, ema(out, signal)
+
+
 # ---------- 크로스 탐지 ----------
 
 def crosses(a: Series, b: Series | float):
@@ -105,17 +124,20 @@ def analyze(candles: list[dict], display: int | None = None) -> dict:
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
+    volumes = [c["volume"] for c in candles]
 
     macd_line, macd_sig, macd_osc = macd(closes)
     rsi14 = rsi(closes)
     stoch_k, stoch_d = stochastic(highs, lows, closes)
     ma3, ma20, ma60 = sma(closes, 3), sma(closes, 20), sma(closes, 60)
+    obv_line, obv_sig = obv(closes, volumes)
 
     ind = {
         "ma3": ma3, "ma20": ma20, "ma60": ma60,
         "macd": macd_line, "macd_signal": macd_sig, "macd_osc": macd_osc,
         "rsi": rsi14,
         "stoch_k": stoch_k, "stoch_d": stoch_d,
+        "obv": obv_line, "obv_signal": obv_sig,
     }
 
     signals = []
@@ -144,6 +166,10 @@ def analyze(candles: list[dict], display: int | None = None) -> dict:
     for i, d in crosses(ma3, ma20):
         add(i, "buy" if d == "up" else "sell", "MA",
             "이평 골든크로스 (3일선 > 20일선)" if d == "up" else "이평 데드크로스 (3일선 < 20일선)")
+
+    for i, d in crosses(obv_line, obv_sig):
+        add(i, "buy" if d == "up" else "sell", "OBV",
+            "OBV 시그널 상향 돌파 (거래량 유입)" if d == "up" else "OBV 시그널 하향 이탈 (거래량 이탈)")
 
     start = max(0, len(candles) - display) if display else 0
     signals = sorted((s for s in signals if s["index"] >= start), key=lambda s: s["index"])
