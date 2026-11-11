@@ -15,7 +15,7 @@ from realtime import hub, snapshot_book, snapshot_tick
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="Stock API (한국투자증권 KIS)")
+app = FastAPI(title="Stock API (!한국투자증권 KIS!)")
 
 
 def call(fn, *args):
