@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -71,7 +72,23 @@ def _issue_token() -> str:
     return data["access_token"]
 
 
-def _get(path: str, tr_id: str, params: dict) -> dict:
+# 초당 요청 수 제한 (실전 20건, 모의 2건이지만 여유 있게 잡는다. .env의 KIS_RPS로 조정 가능)
+RPS = float(os.getenv("KIS_RPS", "2" if BASE_URL == MOCK_URL else "5"))
+_rate_lock = threading.Lock()
+_last_call = 0.0
+
+
+def _throttle() -> None:
+    """요청 사이에 최소 간격(1/RPS초)을 둔다."""
+    global _last_call
+    with _rate_lock:
+        wait = _last_call + 1 / RPS - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.monotonic()
+
+
+def _get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {get_access_token()}",
@@ -80,8 +97,14 @@ def _get(path: str, tr_id: str, params: dict) -> dict:
         "tr_id": tr_id,
         "custtype": "P",
     }
-    res = httpx.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=10)
-    data = res.json()
+    for attempt in range(retries + 1):
+        _throttle()
+        res = httpx.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=10)
+        data = res.json()
+        if data.get("msg_cd") == "EGW00201" and attempt < retries:  # 초당 거래건수 초과
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
     if data.get("rt_cd") != "0":
         raise KISError(f"[{data.get('msg_cd')}] {data.get('msg1', data)}")
     return data
