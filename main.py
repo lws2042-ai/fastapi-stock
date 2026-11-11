@@ -80,6 +80,31 @@ def stock_daily(code: str, period: Literal["D", "W", "M"] = "D"):
 
 
 WARMUP = 60  # 지표 계산용으로 더 받아오는 봉 수 (MA60, MACD 26+9)
+CHART_TTL = 30  # 초. 화면은 1분마다 다시 받고, 마지막 캔들은 실시간 체결로 갱신된다.
+
+_chart_cache: dict[tuple, tuple[float, dict]] = {}
+_chart_locks: dict[tuple, threading.Lock] = {}
+_chart_locks_guard = threading.Lock()
+
+
+def _cached_chart(key: tuple, build):
+    """CHART_TTL 동안 결과를 재사용. 같은 키가 동시에 들어오면(미리 불러오기 + 실제 클릭 등) KIS는 한 번만 부른다."""
+    hit = _chart_cache.get(key)
+    if hit and time.monotonic() - hit[0] < CHART_TTL:
+        return hit[1]
+    with _chart_locks_guard:
+        lock = _chart_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _chart_cache.get(key)  # 기다리는 동안 다른 요청이 채웠을 수 있다
+        if hit and time.monotonic() - hit[0] < CHART_TTL:
+            return hit[1]
+        data = build()
+        _chart_cache[key] = (time.monotonic(), data)
+        if len(_chart_cache) > 500:  # 오래된 항목 정리
+            now = time.monotonic()
+            for k in [k for k, (t, _) in _chart_cache.items() if now - t >= CHART_TTL]:
+                _chart_cache.pop(k, None)
+        return data
 
 
 @app.get("/stocks/{code}/chart")
@@ -92,12 +117,16 @@ def stock_chart(
 
     period: D(일봉) / W(주봉) / M(월봉) / 60(60분봉, 최근 12거래일)
     """
-    if period == "60":
-        candles = call(kis.domestic_hourly, code)
-        # 앞쪽 26봉은 MACD 계산 워밍업으로만 쓴다
-        return indicators.analyze(candles, display=max(len(candles) - 26, 1))
-    candles = call(kis.domestic_chart, code, period, count + WARMUP)
-    return indicators.analyze(candles, display=count)
+
+    def build():
+        if period == "60":
+            candles = call(kis.domestic_hourly, code)
+            # 앞쪽 26봉은 MACD 계산 워밍업으로만 쓴다
+            return indicators.analyze(candles, display=max(len(candles) - 26, 1))
+        candles = call(kis.domestic_chart, code, period, count + WARMUP)
+        return indicators.analyze(candles, display=count)
+
+    return _cached_chart((code, period, count if period != "60" else 0), build)
 
 
 @app.get("/stocks/{code}/orderbook")
@@ -123,9 +152,10 @@ async def stock_realtime(ws: WebSocket, code: str):
     receiver = asyncio.create_task(ws.receive_text())
     getter = None
     try:
-        for fn in (snapshot_tick, snapshot_book):
+        # 현재가/호가 스냅샷을 동시에 요청하고, 먼저 온 것부터 보낸다
+        for fut in asyncio.as_completed([asyncio.to_thread(fn, code) for fn in (snapshot_tick, snapshot_book)]):
             try:
-                await ws.send_json(await asyncio.to_thread(fn, code))
+                await ws.send_json(await fut)
             except kis.KISError as e:
                 await ws.send_json({"type": "status", "state": "error", "message": str(e)})
 
