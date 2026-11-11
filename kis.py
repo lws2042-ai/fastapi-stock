@@ -3,8 +3,9 @@
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -20,7 +21,9 @@ APP_SECRET = os.getenv("KIS_APP_SECRET", "")
 BASE_URL = MOCK_URL if os.getenv("KIS_MOCK", "false").lower() == "true" else REAL_URL
 
 # 토큰은 24시간 유효하고 발급은 1분에 1회로 제한되므로 파일에 캐시한다.
-TOKEN_FILE = Path(__file__).parent / ".kis_token.json"
+# Vercel 등 서버리스 환경은 /tmp 만 쓸 수 있다.
+DATA_DIR = Path("/tmp") if os.getenv("VERCEL") else Path(__file__).parent
+TOKEN_FILE = DATA_DIR / ".kis_token.json"
 
 
 class KISError(Exception):
@@ -88,7 +91,7 @@ def _throttle() -> None:
         _last_call = time.monotonic()
 
 
-def _get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
+def _get(path: str, tr_id: str, params: dict, retries: int = 5) -> dict:
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {get_access_token()}",
@@ -102,7 +105,7 @@ def _get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
         res = httpx.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=10)
         data = res.json()
         if data.get("msg_cd") == "EGW00201" and attempt < retries:  # 초당 거래건수 초과
-            time.sleep(0.5 * (attempt + 1))
+            time.sleep(0.4 * (attempt + 1))
             continue
         break
     if data.get("rt_cd") != "0":
@@ -135,6 +138,127 @@ def domestic_daily(code: str, period: str = "D") -> dict:
     )
 
 
+def domestic_chart(code: str, period: str = "D", count: int = 180) -> list[dict]:
+    """기간별 시세(캔들). 한 번에 100건까지라 날짜를 거슬러 가며 count개를 모은다.
+
+    period: D(일) / W(주) / M(월) / Y(년). 결과는 오래된 순.
+    """
+    by_date: dict[str, dict] = {}
+    end = datetime.now().strftime("%Y%m%d")
+    for _ in range(10):  # 안전장치
+        data = _get(
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            "FHKST03010100",
+            {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": code,
+                "FID_INPUT_DATE_1": "19800101",
+                "FID_INPUT_DATE_2": end,
+                "FID_PERIOD_DIV_CODE": period,
+                "FID_ORG_ADJ_PRC": "0",  # 0 수정주가
+            },
+        )
+        batch = [r for r in data.get("output2", []) if r.get("stck_bsop_date")]
+        if not batch:
+            break
+        for r in batch:
+            by_date[r["stck_bsop_date"]] = {
+                "date": r["stck_bsop_date"],
+                "open": int(r["stck_oprc"]),
+                "high": int(r["stck_hgpr"]),
+                "low": int(r["stck_lwpr"]),
+                "close": int(r["stck_clpr"]),
+                "volume": int(r["acml_vol"]),
+            }
+        if len(by_date) >= count:
+            break
+        oldest = min(r["stck_bsop_date"] for r in batch)
+        end = (datetime.strptime(oldest, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+
+    candles = [by_date[d] for d in sorted(by_date)]
+    return candles[-count:]
+
+
+MINUTE_CACHE = DATA_DIR / ".cache" / "minute"
+
+
+def _minute_bars_of_day(code: str, date: str) -> list[dict]:
+    """하루치 1분봉 (오래된 순). 지난 날짜는 바뀌지 않으므로 파일에 캐시한다."""
+    cache = MINUTE_CACHE / f"{code}_{date}.json"
+    is_today = date == datetime.now().strftime("%Y%m%d")
+    if not is_today and cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8"))
+
+    bars: dict[str, dict] = {}
+    hour = "153000"
+    for _ in range(6):  # 하루 390분 / 120건 = 4회면 충분
+        data = _get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice",
+            "FHKST03010230",
+            {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": code,
+                "FID_INPUT_HOUR_1": hour,
+                "FID_INPUT_DATE_1": date,
+                "FID_PW_DATA_INCU_YN": "Y",
+                "FID_FAKE_TICK_INCU_YN": "",
+            },
+        )
+        rows = [r for r in data.get("output2", []) if r.get("stck_bsop_date") == date]
+        for r in rows:
+            if int(r["stck_prpr"] or 0) > 0:
+                bars[r["stck_cntg_hour"]] = {
+                    "time": r["stck_cntg_hour"],
+                    "open": int(r["stck_oprc"]),
+                    "high": int(r["stck_hgpr"]),
+                    "low": int(r["stck_lwpr"]),
+                    "close": int(r["stck_prpr"]),
+                    "volume": int(r["cntg_vol"]),
+                }
+        if not rows:
+            break
+        earliest = min(r["stck_cntg_hour"] for r in rows)
+        if earliest <= "090100":
+            break
+        t = datetime.strptime(earliest, "%H%M%S") - timedelta(minutes=1)
+        hour = t.strftime("%H%M%S")
+
+    result = [bars[t] for t in sorted(bars)]
+    if not is_today and result:
+        MINUTE_CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(result), encoding="utf-8")
+    return result
+
+
+def domestic_hourly(code: str, days: int = 12, minutes: int = 60) -> list[dict]:
+    """최근 days 거래일의 1분봉을 minutes분봉으로 묶는다. date는 'YYYYMMDDHHMM'(봉 시작 시각)."""
+    trading_days = [c["date"] for c in domestic_chart(code, "D", days)]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        days_bars = list(ex.map(lambda d: _minute_bars_of_day(code, d), trading_days))
+    candles = []
+    for date, bars in zip(trading_days, days_bars):
+        buckets: dict[int, dict] = {}
+        for b in bars:
+            # 분봉 시각은 봉이 끝나는 시각 (090100 = 09:00~09:01)
+            hh, mm = int(b["time"][:2]), int(b["time"][2:4])
+            idx = max(0, hh * 60 + mm - 1 - 9 * 60) // minutes
+            c = buckets.get(idx)
+            if c is None:
+                start = 9 * 60 + idx * minutes
+                buckets[idx] = {
+                    "date": f"{date}{start // 60:02d}{start % 60:02d}",
+                    "open": b["open"], "high": b["high"], "low": b["low"],
+                    "close": b["close"], "volume": b["volume"],
+                }
+            else:
+                c["high"] = max(c["high"], b["high"])
+                c["low"] = min(c["low"], b["low"])
+                c["close"] = b["close"]
+                c["volume"] += b["volume"]
+        candles.extend(buckets[i] for i in sorted(buckets))
+    return candles
+
+
 def domestic_orderbook(code: str) -> dict:
     """주식현재가 호가/예상체결"""
     return _get(
@@ -145,6 +269,9 @@ def domestic_orderbook(code: str) -> dict:
 
 
 # ---------- 국내 순위 (실전투자 전용, 모의투자 미지원) ----------
+
+MARKETS = {"all": "0000", "kospi": "0001", "kosdaq": "1001"}
+
 
 def _normalize_rank(rows: list[dict], limit: int) -> list[dict]:
     """순위 API마다 다른 필드명을 같은 형식으로 맞춘다."""
@@ -160,22 +287,23 @@ def _normalize_rank(rows: list[dict], limit: int) -> list[dict]:
                 "change_rate": float(r.get("prdy_ctrt") or 0),
                 "sign": r.get("prdy_vrss_sign"),
                 "volume": int(r.get("acml_vol") or 0),
+                "trade_value": int(r["acml_tr_pbmn"]) if r.get("acml_tr_pbmn") else None,  # 원
                 "market_cap": int(r["stck_avls"]) if r.get("stck_avls") else None,  # 억원
             }
         )
     return result
 
 
-def rank_market_cap(limit: int = 10) -> list[dict]:
-    """시가총액 상위"""
+def rank_market_cap(limit: int = 10, market: str = "kospi") -> list[dict]:
+    """시가총액 상위 (보통주)"""
     data = _get(
         "/uapi/domestic-stock/v1/ranking/market-cap",
         "FHPST01740000",
         {
             "fid_cond_mrkt_div_code": "J",
             "fid_cond_scr_div_code": "20174",
-            "fid_div_cls_code": "0",  # 전체
-            "fid_input_iscd": "0000",  # 전체 (0001 코스피, 1001 코스닥)
+            "fid_div_cls_code": "1",  # 1 보통주 (우선주 제외)
+            "fid_input_iscd": MARKETS[market],
             "fid_trgt_cls_code": "0",
             "fid_trgt_exls_cls_code": "0",
             "fid_input_price_1": "",
@@ -186,15 +314,15 @@ def rank_market_cap(limit: int = 10) -> list[dict]:
     return _normalize_rank(data["output"], limit)
 
 
-def rank_gainers(limit: int = 10) -> list[dict]:
-    """등락률 상승 순위"""
+def rank_gainers(limit: int = 10, market: str = "kospi") -> list[dict]:
+    """등락률 상승 순위 (실시간)"""
     data = _get(
         "/uapi/domestic-stock/v1/ranking/fluctuation",
         "FHPST01700000",
         {
             "fid_cond_mrkt_div_code": "J",
             "fid_cond_scr_div_code": "20170",
-            "fid_input_iscd": "0000",
+            "fid_input_iscd": MARKETS[market],
             "fid_rank_sort_cls_code": "0",  # 0 상승율순
             "fid_input_cnt_1": "0",
             "fid_prc_cls_code": "1",  # 1 전일종가 대비
@@ -211,17 +339,16 @@ def rank_gainers(limit: int = 10) -> list[dict]:
     return _normalize_rank(data["output"], limit)
 
 
-def rank_volume(limit: int = 10) -> list[dict]:
-    """거래량 순위"""
+def _volume_rank(blng: str, limit: int, market: str) -> list[dict]:
     data = _get(
         "/uapi/domestic-stock/v1/quotations/volume-rank",
         "FHPST01710000",
         {
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000",
-            "FID_DIV_CLS_CODE": "0",
-            "FID_BLNG_CLS_CODE": "0",  # 0 평균거래량
+            "FID_INPUT_ISCD": MARKETS[market],
+            "FID_DIV_CLS_CODE": "1",  # 1 보통주
+            "FID_BLNG_CLS_CODE": blng,
             "FID_TRGT_CLS_CODE": "111111111",
             "FID_TRGT_EXLS_CLS_CODE": "0000000000",
             "FID_INPUT_PRICE_1": "",
@@ -231,6 +358,16 @@ def rank_volume(limit: int = 10) -> list[dict]:
         },
     )
     return _normalize_rank(data["output"], limit)
+
+
+def rank_volume(limit: int = 10, market: str = "kospi") -> list[dict]:
+    """거래량 순위"""
+    return _volume_rank("0", limit, market)
+
+
+def rank_trade_value(limit: int = 10, market: str = "kospi") -> list[dict]:
+    """거래대금 순위"""
+    return _volume_rank("3", limit, market)
 
 
 # ---------- 해외 주식 ----------

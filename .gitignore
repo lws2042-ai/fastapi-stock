@@ -12,3 +12,7 @@ wheels/
 # Secrets
 .env
 .kis_token.json
+.cache/
+
+.vercel
+.env*
