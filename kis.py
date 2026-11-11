@@ -5,7 +5,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -30,12 +30,20 @@ class KISError(Exception):
     pass
 
 
+KST = timezone(timedelta(hours=9), "KST")  # 한국은 서머타임이 없다
+
+
+def kst_now() -> datetime:
+    """한국 시간 (naive). 서버 시계(EC2는 UTC)와 상관없이 KIS의 날짜·시각과 비교할 때 쓴다."""
+    return datetime.now(KST).replace(tzinfo=None)
+
+
 def _load_cached_token() -> str | None:
     if not TOKEN_FILE.exists():
         return None
     data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
     expires = datetime.strptime(data["expires"], "%Y-%m-%d %H:%M:%S")
-    if data.get("base_url") == BASE_URL and (expires - datetime.now()).total_seconds() > 600:
+    if data.get("base_url") == BASE_URL and (expires - kst_now()).total_seconds() > 600:
         return data["access_token"]
     return None
 
@@ -144,7 +152,7 @@ def domestic_chart(code: str, period: str = "D", count: int = 180) -> list[dict]
     period: D(일) / W(주) / M(월) / Y(년). 결과는 오래된 순.
     """
     by_date: dict[str, dict] = {}
-    end = datetime.now().strftime("%Y%m%d")
+    end = kst_now().strftime("%Y%m%d")
     for _ in range(10):  # 안전장치
         data = _get(
             "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
@@ -182,15 +190,9 @@ def domestic_chart(code: str, period: str = "D", count: int = 180) -> list[dict]
 MINUTE_CACHE = DATA_DIR / ".cache" / "minute"
 
 
-def _minute_bars_of_day(code: str, date: str) -> list[dict]:
-    """하루치 1분봉 (오래된 순). 지난 날짜는 바뀌지 않으므로 파일에 캐시한다."""
-    cache = MINUTE_CACHE / f"{code}_{date}.json"
-    is_today = date == datetime.now().strftime("%Y%m%d")
-    if not is_today and cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))
-
+def _fetch_minutes(code: str, date: str, hour: str, stop_at: str) -> dict[str, dict]:
+    """date 의 hour 시각부터 거슬러 올라가며 1분봉을 모은다. stop_at 이하 시각까지 받으면 멈춘다."""
     bars: dict[str, dict] = {}
-    hour = "153000"
     for _ in range(6):  # 하루 390분 / 120건 = 4회면 충분
         data = _get(
             "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice",
@@ -218,21 +220,77 @@ def _minute_bars_of_day(code: str, date: str) -> list[dict]:
         if not rows:
             break
         earliest = min(r["stck_cntg_hour"] for r in rows)
-        if earliest <= "090100":
+        if earliest <= stop_at:
             break
         t = datetime.strptime(earliest, "%H%M%S") - timedelta(minutes=1)
         hour = t.strftime("%H%M%S")
+    return bars
 
-    result = [bars[t] for t in sorted(bars)]
-    if not is_today and result:
-        MINUTE_CACHE.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(result), encoding="utf-8")
+
+TODAY_TTL = 15  # 초. 오늘 분봉을 이 시간 안에는 다시 받지 않는다.
+_today: dict[tuple[str, str], dict] = {}  # (code, date) → {"bars": {time: bar}, "at": monotonic}
+_minute_locks: dict[tuple[str, str], threading.Lock] = {}
+_minute_locks_guard = threading.Lock()
+
+
+def _minute_bars_of_day(code: str, date: str) -> list[dict]:
+    """하루치 1분봉 (오래된 순).
+
+    - 장이 끝난 날: 바뀌지 않으므로 파일에 캐시 → 이후 KIS 호출 없음
+    - 장중인 오늘: 메모리에 두고, 마지막으로 받은 시각 이후(보통 1회 호출)만 새로 받는다
+    """
+    cache = MINUTE_CACHE / f"{code}_{date}.json"
+    now = kst_now()
+    final = date < now.strftime("%Y%m%d") or now.strftime("%H%M") >= "1540"
+    if final and cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8"))
+
+    key = (code, date)
+    with _minute_locks_guard:
+        lock = _minute_locks.setdefault(key, threading.Lock())
+    with lock:
+        if final and cache.exists():
+            return json.loads(cache.read_text(encoding="utf-8"))
+        entry = _today.get(key)
+        if not final and entry and time.monotonic() - entry["at"] < TODAY_TTL:
+            return [entry["bars"][t] for t in sorted(entry["bars"])]
+
+        bars = dict(entry["bars"]) if entry else {}
+        # 이미 받은 마지막 분(진행 중이라 값이 바뀌었을 수 있음)까지 다시 받고 멈춘다
+        stop_at = max(bars) if bars else "090100"
+        hour = "153000" if final else min(now.strftime("%H%M%S"), "153000")
+        bars.update(_fetch_minutes(code, date, hour, stop_at))
+        result = [bars[t] for t in sorted(bars)]
+
+        if final:
+            _today.pop(key, None)
+            if result:
+                MINUTE_CACHE.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(result), encoding="utf-8")
+        else:
+            _today[key] = {"bars": bars, "at": time.monotonic()}
+        return result
+
+
+TRADING_DAYS_TTL = 600  # 초
+_trading_days: dict[tuple[str, int], tuple[float, list[str]]] = {}
+
+
+def _recent_trading_days(code: str, days: int) -> list[str]:
+    """최근 days 거래일 (오래된 순). 자주 바뀌지 않으므로 10분 캐시."""
+    hit = _trading_days.get((code, days))
+    today = kst_now().strftime("%Y%m%d")
+    # 오늘 장이 열렸는데 목록에 오늘이 없으면 다시 받는다
+    if hit and time.monotonic() - hit[0] < TRADING_DAYS_TTL and (hit[1][-1] == today or kst_now().strftime("%H%M") < "0900"):
+        return hit[1]
+    result = [c["date"] for c in domestic_chart(code, "D", days)]
+    _trading_days[(code, days)] = (time.monotonic(), result)
     return result
 
 
 def domestic_hourly(code: str, days: int = 12, minutes: int = 60) -> list[dict]:
     """최근 days 거래일의 1분봉을 minutes분봉으로 묶는다. date는 'YYYYMMDDHHMM'(봉 시작 시각)."""
-    trading_days = [c["date"] for c in domestic_chart(code, "D", days)]
+    trading_days = _recent_trading_days(code, days)
     with ThreadPoolExecutor(max_workers=4) as ex:
         days_bars = list(ex.map(lambda d: _minute_bars_of_day(code, d), trading_days))
     candles = []
