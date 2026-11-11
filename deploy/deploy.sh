@@ -16,6 +16,9 @@ fi
 if ! command -v uv >/dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
+# React 빌드 결과가 올라올 폴더 (deploy-web.sh 로 업로드)
+sudo mkdir -p /var/www/fastapi-stock-react
+sudo chown "$USER" /var/www/fastapi-stock-react
 
 echo "==> 코드 갱신 ($BRANCH)"
 mkdir -p "$APP_DIR"

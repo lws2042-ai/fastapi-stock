@@ -9,6 +9,8 @@ WorkingDirectory=/home/ubuntu/fastapi-stock
 # 실시간 허브와 요청 속도 제한이 프로세스 메모리에 있으므로 워커는 1개만 쓴다.
 ExecStart=/home/ubuntu/fastapi-stock/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
 Environment=PYTHONUNBUFFERED=1
+# 외부에 공개된 서버이므로 주문/계좌 API를 끈다 (.env 값보다 우선)
+Environment=ENABLE_TRADING_API=false
 Restart=always
 RestartSec=3
 

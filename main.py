@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 import asyncio
+import os
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -131,8 +132,15 @@ async def stock_realtime(ws: WebSocket, code: str):
 
 # ---------- 주문 / 계좌 (이 PC에서 온 요청만 허용) ----------
 
+# 서버 배포 시에는 ENABLE_TRADING_API=false 로 주문/계좌 API 자체를 끈다.
+# (nginx 뒤에서는 모든 요청이 127.0.0.1에서 온 것처럼 보이므로 local_only만으로는 막을 수 없다)
+TRADING_API = os.getenv("ENABLE_TRADING_API", "true").lower() == "true"
+
+
 def local_only(request: Request):
     """계좌·주문 API는 localhost 요청만 받는다. 외부 배포 전에는 반드시 로그인 인증을 추가할 것."""
+    if not TRADING_API:
+        raise HTTPException(status_code=404, detail="주문/계좌 API가 꺼져 있습니다.")
     if request.client is None or request.client.host not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(status_code=403, detail="주문/계좌 API는 이 PC에서만 사용할 수 있습니다.")
 
