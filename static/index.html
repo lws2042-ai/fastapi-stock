@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주식 시세</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1a1d21; --muted: #6b7280; --line: #e5e7eb;
+    --up: #e5383b; --down: #1f6feb; --accent: #111827;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #9aa1ab; --line: #2a2f37;
+      --up: #ff5c5f; --down: #4c9bff; --accent: #e6e8eb;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tabs button { border: 1px solid var(--line); background: var(--card); color: var(--text);
+                 padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .tabs button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  input, select { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+                  background: var(--card); color: var(--text); font-size: 15px; }
+  input { flex: 1; min-width: 160px; }
+  form button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent);
+                color: var(--bg); font-size: 15px; cursor: pointer; }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 20px; }
+  .quick button { border: 1px solid var(--line); background: transparent; color: var(--muted);
+                  padding: 4px 10px; border-radius: 999px; font-size: 13px; cursor: pointer; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 14px; color: var(--muted); font-weight: 600; }
+  .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .name { font-size: 18px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .price { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .chg { font-size: 16px; font-weight: 600; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+           gap: 12px 20px; margin-top: 18px; }
+  .stats div { display: flex; justify-content: space-between; border-bottom: 1px dashed var(--line);
+               padding-bottom: 6px; font-size: 14px; }
+  .stats span:first-child { color: var(--muted); }
+  .stats span:last-child { font-variant-numeric: tabular-nums; }
+  .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .period { display: flex; gap: 6px; margin-bottom: 10px; }
+  .period button { border: 1px solid var(--line); background: transparent; color: var(--text);
+                   padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .period button.on { background: var(--accent); color: var(--bg); }
+  .chartbox { position: relative; height: 300px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  td { padding: 4px 6px; text-align: right; }
+  td.p { text-align: center; font-weight: 600; }
+  tr.ask td.p { background: color-mix(in srgb, var(--down) 10%, transparent); }
+  tr.bid td.p { background: color-mix(in srgb, var(--up) 10%, transparent); }
+  .bar { position: relative; }
+  .bar i { position: absolute; top: 3px; bottom: 3px; opacity: .18; }
+  tr.ask .bar i { right: 0; background: var(--down); }
+  tr.bid .bar i { left: 0; background: var(--up); }
+  .bar b { position: relative; font-weight: 400; }
+  tr.bid td.bar { text-align: left; }
+  .daily { max-height: 300px; overflow: auto; margin-top: 16px; }
+  .daily th { position: sticky; top: 0; background: var(--card); color: var(--muted);
+              font-weight: 500; text-align: right; padding: 6px; border-bottom: 1px solid var(--line); }
+  .daily td { border-bottom: 1px solid var(--line); }
+  .msg { padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; font-size: 14px;
+         background: color-mix(in srgb, var(--up) 12%, var(--card)); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre { background: var(--bg); padding: 12px; border-radius: 8px; overflow: auto;
+        max-height: 360px; font-size: 12px; }
+  .hidden { display: none; }
+  .rank-head { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .rank-head button { border: 1px solid var(--line); background: var(--card); color: var(--text);
+                      padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .ranks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 8px; }
+  @media (max-width: 900px) { .ranks { grid-template-columns: 1fr; } }
+  .ranks .card { padding: 16px 12px; }
+  .ranks .card h2 { padding-left: 6px; }
+  table.rank { font-size: 14px; }
+  table.rank tr { cursor: pointer; }
+  table.rank tr:hover td { background: var(--bg); }
+  table.rank tr.sel td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  table.rank td { padding: 7px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.rank tr:last-child td { border-bottom: 0; }
+  table.rank td.no { color: var(--muted); text-align: center; width: 24px; }
+  table.rank td.nm { text-align: left; overflow: hidden; text-overflow: ellipsis; max-width: 120px; font-weight: 600; }
+  table.rank td.ex { color: var(--muted); font-size: 12px; }
+  .skeleton td { color: var(--muted); text-align: center; padding: 30px 0; cursor: default; }
+  #kr-body { scroll-margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📈 주식 시세 <span class="sub">한국투자증권 Open API</span></h1>
+
+  <div class="tabs">
+    <button data-tab="kr" class="on">국내</button>
+    <button data-tab="us">해외</button>
+  </div>
+
+  <!-- 국내 -->
+  <section id="tab-kr">
+    <div class="rank-head">
+      <span class="sub" id="rank-time"></span>
+      <button id="rank-refresh">↻ 새로고침</button>
+    </div>
+    <div id="rank-msg"></div>
+    <div class="ranks">
+      <div class="card"><h2>🏢 시가총액 TOP 10</h2><table class="rank" id="rank-market-cap"></table></div>
+      <div class="card"><h2>🚀 급등주 TOP 10</h2><table class="rank" id="rank-gainers"></table></div>
+      <div class="card"><h2>🔥 거래량 TOP 10</h2><table class="rank" id="rank-volume"></table></div>
+    </div>
+
+    <form id="kr-form">
+      <input id="kr-code" placeholder="종목코드 6자리로 직접 검색 (예: 005930)" maxlength="6">
+      <button>조회</button>
+    </form>
+    <div class="quick" id="kr-quick"></div>
+    <div id="kr-msg"></div>
+    <div id="kr-body" class="hidden">
+      <div class="card" id="kr-summary"></div>
+      <div class="grid2">
+        <div class="card">
+          <h2>시세 차트</h2>
+          <div class="period" id="kr-period">
+            <button data-p="D" class="on">일</button><button data-p="W">주</button><button data-p="M">월</button>
+          </div>
+          <div class="chartbox"><canvas id="kr-chart"></canvas></div>
+          <div class="daily"><table id="kr-daily"></table></div>
+        </div>
+        <div class="card">
+          <h2>호가</h2>
+          <table id="kr-book"></table>
+        </div>
+      </div>
+      <div class="card">
+        <details><summary>원본 JSON 보기</summary><pre id="kr-raw"></pre></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- 해외 -->
+  <section id="tab-us" class="hidden">
+    <form id="us-form">
+      <select id="us-ex">
+        <option value="NAS">나스닥</option><option value="NYS">뉴욕</option><option value="AMS">아멕스</option>
+        <option value="HKS">홍콩</option><option value="TSE">도쿄</option>
+      </select>
+      <input id="us-sym" placeholder="심볼 (예: AAPL)" value="AAPL">
+      <button>조회</button>
+    </form>
+    <div class="quick" id="us-quick"></div>
+    <div id="us-msg"></div>
+    <div id="us-body" class="hidden">
+      <div class="card" id="us-summary"></div>
+      <div class="card">
+        <details><summary>원본 JSON 보기</summary><pre id="us-raw"></pre></details>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const num = (v, d = 0) => v == null || v === "" ? "-" :
+  Number(v).toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d });
+// KIS 부호: 1 상한, 2 상승, 3 보합, 4 하한, 5 하락
+const dir = (sign) => (sign === "1" || sign === "2") ? "up" : (sign === "4" || sign === "5") ? "down" : "";
+const arrow = (sign) => ({ "1": "↑", "2": "▲", "4": "↓", "5": "▼" }[sign] || "");
+const fmtDate = (s) => `${s.slice(0, 4)}.${s.slice(4, 6)}.${s.slice(6, 8)}`;
+
+async function api(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+function showError(el, e) { $(el).innerHTML = `<div class="msg">⚠️ ${e.message}</div>`; }
+
+// 탭
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  $("tab-kr").classList.toggle("hidden", b.dataset.tab !== "kr");
+  $("tab-us").classList.toggle("hidden", b.dataset.tab !== "us");
+});
+
+// 빠른 선택
+const KR_QUICK = { "005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER",
+                   "035720": "카카오", "005380": "현대차", "373220": "LG에너지솔루션" };
+const US_QUICK = [["NAS", "AAPL"], ["NAS", "NVDA"], ["NAS", "TSLA"], ["NAS", "MSFT"], ["NYS", "KO"]];
+$("kr-quick").innerHTML = Object.entries(KR_QUICK).map(([c, n]) => `<button data-c="${c}">${n}</button>`).join("");
+$("us-quick").innerHTML = US_QUICK.map(([e, s]) => `<button data-e="${e}" data-s="${s}">${s}</button>`).join("");
+$("kr-quick").onclick = (ev) => { const c = ev.target.dataset.c; if (c) { $("kr-code").value = c; loadKr(true); } };
+$("us-quick").onclick = (ev) => { const s = ev.target.dataset.s; if (s) { $("us-ex").value = ev.target.dataset.e; $("us-sym").value = s; loadUs(); } };
+
+// ---------- 순위 ----------
+const NAMES = { ...KR_QUICK };  // 종목코드 → 종목명 (순위에서 받은 이름으로 채워짐)
+const fmtCap = (eok) => eok >= 10000 ? `${num(eok / 10000, 1)}조` : `${num(eok)}억`;
+const fmtVol = (v) => v >= 1e8 ? `${num(v / 1e8, 1)}억주` : v >= 1e4 ? `${num(v / 1e4)}만주` : `${num(v)}주`;
+const RANK_EXTRA = {
+  "market-cap": (r) => fmtCap(r.market_cap),
+  "gainers": (r) => fmtVol(r.volume),
+  "volume": (r) => fmtVol(r.volume),
+};
+
+async function loadRankings() {
+  $("rank-msg").innerHTML = "";
+  const kinds = Object.keys(RANK_EXTRA);
+  kinds.forEach((k) => $(`rank-${k}`).innerHTML = `<tr class="skeleton"><td>불러오는 중…</td></tr>`);
+  const results = await Promise.allSettled(kinds.map((k) => api(`/rankings/${k}`)));
+  const errors = [];
+  results.forEach((res, i) => {
+    const k = kinds[i], el = $(`rank-${k}`);
+    if (res.status === "rejected") {
+      errors.push(res.reason.message);
+      el.innerHTML = `<tr class="skeleton"><td>불러오지 못했습니다</td></tr>`;
+      return;
+    }
+    el.innerHTML = res.value.map((r) => {
+      NAMES[r.code] = r.name;
+      const c = dir(r.sign);
+      return `<tr data-code="${r.code}">
+        <td class="no">${r.rank}</td>
+        <td class="nm" title="${r.name}">${r.name}</td>
+        <td class="${c}">${num(r.price)}</td>
+        <td class="${c}">${r.change_rate > 0 ? "+" : ""}${r.change_rate.toFixed(2)}%</td>
+        <td class="ex">${RANK_EXTRA[k](r)}</td></tr>`;
+    }).join("");
+  });
+  if (errors.length) showError("rank-msg", new Error([...new Set(errors)].join(" / ")));
+  $("rank-time").textContent = `${new Date().toLocaleTimeString("ko-KR")} 기준`;
+  markSelected();
+}
+
+function markSelected() {
+  const code = $("kr-code").value.trim();
+  document.querySelectorAll("table.rank tr[data-code]").forEach((tr) =>
+    tr.classList.toggle("sel", tr.dataset.code === code));
+}
+
+document.querySelector(".ranks").onclick = (ev) => {
+  const tr = ev.target.closest("tr[data-code]");
+  if (!tr) return;
+  $("kr-code").value = tr.dataset.code;
+  loadKr(true);
+};
+$("rank-refresh").onclick = loadRankings;
+
+// ---------- 국내 상세 ----------
+let chart, period = "D";
+
+async function loadKr(scroll = false) {
+  const code = $("kr-code").value.trim();
+  if (!/^\d{6}$/.test(code)) { showError("kr-msg", new Error("종목코드 6자리를 입력하세요.")); return; }
+  $("kr-msg").innerHTML = "";
+  markSelected();
+  try {
+    const [price, book] = await Promise.all([api(`/stocks/${code}`), api(`/stocks/${code}/orderbook`)]);
+    renderSummary(code, price.output);
+    renderBook(book.output1, price.output.stck_prpr);
+    $("kr-raw").textContent = JSON.stringify({ price, orderbook: book }, null, 2);
+    $("kr-body").classList.remove("hidden");
+    if (scroll) $("kr-body").scrollIntoView({ behavior: "smooth" });
+    await loadDaily(code);
+  } catch (e) { showError("kr-msg", e); $("kr-body").classList.add("hidden"); }
+}
+
+function renderSummary(code, o) {
+  const c = dir(o.prdy_vrss_sign);
+  const stats = [
+    ["시가", num(o.stck_oprc)], ["고가", num(o.stck_hgpr)], ["저가", num(o.stck_lwpr)],
+    ["상한가", num(o.stck_mxpr)], ["하한가", num(o.stck_llam)], ["거래량", num(o.acml_vol)],
+    ["거래대금", num(o.acml_tr_pbmn / 1e8) + "억"], ["시가총액", num(o.hts_avls) + "억"],
+    ["PER", num(o.per, 2)], ["PBR", num(o.pbr, 2)], ["EPS", num(o.eps)], ["BPS", num(o.bps)],
+    ["52주 최고", num(o.w52_hgpr)], ["52주 최저", num(o.w52_lwpr)], ["외국인 소진율", num(o.hts_frgn_ehrt, 2) + "%"],
+  ];
+  $("kr-summary").innerHTML = `
+    <div class="head">
+      <span class="name">${NAMES[code] || code}</span>
+      <span class="sub">${code} · ${o.rprs_mrkt_kor_name || ""} · ${o.bstp_kor_isnm || ""}</span>
+    </div>
+    <div class="head" style="margin-top:6px">
+      <span class="price ${c}">${num(o.stck_prpr)}</span>
+      <span class="chg ${c}">${arrow(o.prdy_vrss_sign)} ${num(Math.abs(o.prdy_vrss))} (${o.prdy_ctrt}%)</span>
+    </div>
+    <div class="stats">${stats.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("")}</div>`;
+}
+
+function renderBook(o, cur) {
+  const asks = [], bids = [];
+  for (let i = 1; i <= 10; i++) {
+    asks.push([o[`askp${i}`], +o[`askp_rsqn${i}`]]);
+    bids.push([o[`bidp${i}`], +o[`bidp_rsqn${i}`]]);
+  }
+  const max = Math.max(...asks.map((a) => a[1]), ...bids.map((b) => b[1]), 1);
+  const w = (q) => (q / max * 100).toFixed(1);
+  const pc = (p) => +p > +cur ? "up" : +p < +cur ? "down" : "";
+  $("kr-book").innerHTML =
+    asks.reverse().map(([p, q]) => `<tr class="ask"><td class="bar"><i style="width:${w(q)}%"></i><b>${num(q)}</b></td><td class="p ${pc(p)}">${num(p)}</td><td></td></tr>`).join("") +
+    bids.map(([p, q]) => `<tr class="bid"><td></td><td class="p ${pc(p)}">${num(p)}</td><td class="bar"><i style="width:${w(q)}%"></i><b>${num(q)}</b></td></tr>`).join("") +
+    `<tr><td class="sub">${num(o.total_askp_rsqn)}</td><td class="p sub">총잔량</td><td class="sub" style="text-align:left">${num(o.total_bidp_rsqn)}</td></tr>`;
+}
+
+async function loadDaily(code) {
+  const data = await api(`/stocks/${code}/daily?period=${period}`);
+  const rows = data.output.filter((r) => r.stck_bsop_date).reverse();
+  const css = getComputedStyle(document.documentElement);
+  const up = css.getPropertyValue("--up").trim(), muted = css.getPropertyValue("--muted").trim(),
+        line = css.getPropertyValue("--line").trim();
+  if (chart) chart.destroy();
+  chart = new Chart($("kr-chart"), {
+    data: {
+      labels: rows.map((r) => fmtDate(r.stck_bsop_date).slice(2)),
+      datasets: [
+        { type: "line", label: "종가", data: rows.map((r) => +r.stck_clpr), borderColor: up,
+          backgroundColor: up + "22", fill: true, tension: .25, pointRadius: 0, yAxisID: "y" },
+        { type: "bar", label: "거래량", data: rows.map((r) => +r.acml_vol), backgroundColor: muted + "55", yAxisID: "v" },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false },
+                 tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${num(c.raw)}` } } },
+      scales: {
+        x: { ticks: { color: muted, maxTicksLimit: 8 }, grid: { display: false } },
+        y: { position: "right", ticks: { color: muted, callback: (v) => num(v) }, grid: { color: line } },
+        v: { display: false, max: Math.max(...rows.map((r) => +r.acml_vol)) * 4 },
+      },
+    },
+  });
+  $("kr-daily").innerHTML = `<tr><th>일자</th><th>종가</th><th>대비</th><th>등락률</th><th>시가</th><th>고가</th><th>저가</th><th>거래량</th></tr>` +
+    rows.slice().reverse().map((r) => {
+      const c = dir(r.prdy_vrss_sign);
+      return `<tr><td>${fmtDate(r.stck_bsop_date)}</td><td class="${c}">${num(r.stck_clpr)}</td>
+        <td class="${c}">${arrow(r.prdy_vrss_sign)} ${num(Math.abs(r.prdy_vrss))}</td><td class="${c}">${r.prdy_ctrt}%</td>
+        <td>${num(r.stck_oprc)}</td><td>${num(r.stck_hgpr)}</td><td>${num(r.stck_lwpr)}</td><td>${num(r.acml_vol)}</td></tr>`;
+    }).join("");
+}
+
+$("kr-period").onclick = (ev) => {
+  const p = ev.target.dataset.p; if (!p) return;
+  period = p;
+  document.querySelectorAll("#kr-period button").forEach((b) => b.classList.toggle("on", b.dataset.p === p));
+  loadDaily($("kr-code").value.trim()).catch((e) => showError("kr-msg", e));
+};
+$("kr-form").onsubmit = (e) => { e.preventDefault(); loadKr(true); };
+
+// ---------- 해외 ----------
+async function loadUs() {
+  const ex = $("us-ex").value, sym = $("us-sym").value.trim().toUpperCase();
+  $("us-msg").innerHTML = "";
+  try {
+    const data = await api(`/overseas/${ex}/${sym}`);
+    const o = data.output;
+    if (!o.last) throw new Error("시세가 없습니다. 거래소와 심볼을 확인하세요.");
+    const c = dir(o.sign), d = +o.zdiv || 2;
+    $("us-summary").innerHTML = `
+      <div class="head"><span class="name">${sym}</span><span class="sub">${$("us-ex").selectedOptions[0].text}</span></div>
+      <div class="head" style="margin-top:6px">
+        <span class="price ${c}">${num(o.last, d)}</span>
+        <span class="chg ${c}">${arrow(o.sign)} ${num(Math.abs(o.diff), d)} (${o.rate}%)</span>
+      </div>
+      <div class="stats">
+        <div><span>전일종가</span><span>${num(o.base, d)}</span></div>
+        <div><span>거래량</span><span>${num(o.tvol)}</span></div>
+        <div><span>거래대금</span><span>${num(o.tamt)}</span></div>
+        <div><span>전일거래량</span><span>${num(o.pvol)}</span></div>
+        <div><span>주문가능</span><span>${o.ordy || "-"}</span></div>
+      </div>`;
+    $("us-raw").textContent = JSON.stringify(data, null, 2);
+    $("us-body").classList.remove("hidden");
+  } catch (e) { showError("us-msg", e); $("us-body").classList.add("hidden"); }
+}
+$("us-form").onsubmit = (e) => { e.preventDefault(); loadUs(); };
+
+loadRankings();
+</script>
+</body>
+</html>
