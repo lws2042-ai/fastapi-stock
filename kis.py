@@ -370,6 +370,26 @@ def rank_trade_value(limit: int = 10, market: str = "kospi") -> list[dict]:
     return _volume_rank("3", limit, market)
 
 
+def rank_active(limit: int = 10, market: str = "kospi") -> list[dict]:
+    """거래대금 + 거래량 종합 순위.
+
+    거래량 상위 30과 거래대금 상위 30을 합친 뒤, 각 지표를 후보 중 최댓값으로 나눈 값의 합(0~2)으로 정렬한다.
+    거래량만 많은 저가주나 거래대금만 큰 고가주보다 '돈과 손이 함께 몰린' 종목이 위로 온다.
+    """
+    pool: dict[str, dict] = {}
+    for r in _volume_rank("0", 30, market) + _volume_rank("3", 30, market):
+        pool[r["code"]] = r
+    rows = list(pool.values())
+    max_vol = max((r["volume"] for r in rows), default=0) or 1
+    max_tv = max((r["trade_value"] or 0 for r in rows), default=0) or 1
+    for r in rows:
+        r["score"] = round(r["volume"] / max_vol + (r["trade_value"] or 0) / max_tv, 4)
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    for i, r in enumerate(rows[:limit], 1):
+        r["rank"] = i
+    return rows[:limit]
+
+
 # ---------- 해외 주식 ----------
 
 def overseas_price(exchange: str, symbol: str) -> dict:

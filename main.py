@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import Literal
 
 import asyncio
+import threading
+import time
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -31,22 +33,38 @@ def read_home():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+RANK_TTL = 5  # 초
+_rank_cache: dict[tuple, tuple[float, list]] = {}
+_rank_lock = threading.Lock()
+
 RANKINGS = {
     "market-cap": kis.rank_market_cap,
     "gainers": kis.rank_gainers,
     "volume": kis.rank_volume,
     "trade-value": kis.rank_trade_value,
+    "active": kis.rank_active,
 }
 
 
 @app.get("/rankings/{kind}")
 def rankings(
-    kind: Literal["market-cap", "gainers", "volume", "trade-value"],
+    kind: Literal["market-cap", "gainers", "volume", "trade-value", "active"],
     market: Literal["kospi", "kosdaq", "all"] = "kospi",
     limit: int = Query(10, ge=1, le=30),
 ):
-    """국내 순위 TOP N: market-cap(시가총액) / gainers(급등) / volume(거래량) / trade-value(거래대금)"""
-    return call(RANKINGS[kind], limit, market)
+    """국내 순위 TOP N: market-cap(시가총액) / gainers(급등) / volume(거래량) / trade-value(거래대금) / active(거래대금+거래량 종합)
+
+    여러 화면이 몇 초마다 새로고침해도 KIS 호출 한도를 넘지 않도록 RANK_TTL초 동안 결과를 공유한다.
+    """
+    key = (kind, market, limit)
+    with _rank_lock:
+        hit = _rank_cache.get(key)
+        if hit and time.monotonic() - hit[0] < RANK_TTL:
+            return hit[1]
+    data = call(RANKINGS[kind], limit, market)
+    with _rank_lock:
+        _rank_cache[key] = (time.monotonic(), data)
+    return data
 
 
 @app.get("/stocks/{code}")
