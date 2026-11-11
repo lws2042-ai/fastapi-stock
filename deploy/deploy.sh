@@ -18,10 +18,13 @@ if ! command -v uv >/dev/null; then
 fi
 
 echo "==> 코드 갱신 ($BRANCH)"
-if [ ! -d "$APP_DIR/.git" ]; then
-  git clone "$REPO_URL" "$APP_DIR"
-fi
+mkdir -p "$APP_DIR"
 cd "$APP_DIR"
+if [ ! -d .git ]; then
+  # .env 를 먼저 넣어 둔 폴더에서도 동작하도록 clone 대신 init + fetch
+  git init -q
+  git remote add origin "$REPO_URL"
+fi
 git fetch --prune origin "$BRANCH"
 git reset --hard "origin/$BRANCH"   # .env 같은 무시된 파일은 지우지 않는다
 git log -1 --oneline
