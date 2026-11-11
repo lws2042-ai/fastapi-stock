@@ -45,12 +45,57 @@ if ! cmp -s deploy/fastapi-stock.service /etc/systemd/system/fastapi-stock.servi
   sudo systemctl daemon-reload
   sudo systemctl enable fastapi-stock
 fi
-if ! cmp -s deploy/nginx.conf /etc/nginx/sites-available/fastapi-stock; then
-  sudo install -m 644 deploy/nginx.conf /etc/nginx/sites-available/fastapi-stock
+CERT_NAME="fastapi-stock"
+CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
+has_cert() { sudo test -f "$CERT_DIR/fullchain.pem"; }
+
+# nginx 설정 설치: 인증서가 있으면 HTTPS, 없으면 HTTP 전용
+install_nginx() {
+  local site=deploy/nginx.conf changed=0
+  has_cert && site=deploy/nginx-https.conf
+  if ! cmp -s deploy/nginx-app.conf /etc/nginx/snippets/fastapi-stock-app.conf; then
+    sudo install -m 644 -D deploy/nginx-app.conf /etc/nginx/snippets/fastapi-stock-app.conf; changed=1
+  fi
+  if ! cmp -s "$site" /etc/nginx/sites-available/fastapi-stock; then
+    sudo install -m 644 "$site" /etc/nginx/sites-available/fastapi-stock; changed=1
+  fi
   sudo ln -sf /etc/nginx/sites-available/fastapi-stock /etc/nginx/sites-enabled/fastapi-stock
   sudo rm -f /etc/nginx/sites-enabled/default
-  sudo nginx -t
-  sudo systemctl reload nginx || sudo systemctl restart nginx
+  if [ "$changed" = 1 ]; then
+    echo "   nginx: $(basename "$site")"
+    sudo nginx -t
+    sudo systemctl reload nginx || sudo systemctl restart nginx
+  fi
+}
+
+sudo mkdir -p /var/www/certbot
+install_nginx
+
+echo "==> HTTPS 인증서 (Let's Encrypt IP 주소 인증서)"
+# IP 인증서는 certbot 5.4 이상 + shortlived(6일) 프로필이 필요하다. apt 버전은 오래돼서 snap 을 쓴다.
+if ! snap list certbot >/dev/null 2>&1; then
+  sudo snap install --classic certbot
+fi
+CERTBOT=/snap/bin/certbot
+# 인증서가 갱신되면 nginx 가 새 인증서를 읽도록
+sudo install -d /etc/letsencrypt/renewal-hooks/deploy
+printf '#!/bin/sh\nsystemctl reload nginx\n' | sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh >/dev/null
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+
+if ! has_cert; then
+  # 탄력적 IP 를 인스턴스 메타데이터(IMDSv2)에서 읽는다
+  IMDS_TOKEN=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60" || true)
+  PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+  if [ -n "$PUBLIC_IP" ] && sudo "$CERTBOT" certonly --webroot -w /var/www/certbot \
+        --cert-name "$CERT_NAME" --ip-address "$PUBLIC_IP" --preferred-profile shortlived \
+        --agree-tos --register-unsafely-without-email --non-interactive; then
+    echo "   발급 완료: $PUBLIC_IP"
+    install_nginx
+  else
+    echo "⚠️  인증서 발급 실패 — HTTP 로만 서비스합니다. (certbot $("$CERTBOT" --version 2>&1))" >&2
+  fi
+else
+  echo "   인증서 있음 (자동 갱신: snap.certbot.renew.timer)"
 fi
 
 echo "==> 재시작"

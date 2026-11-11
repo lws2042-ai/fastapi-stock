@@ -43,8 +43,10 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
           for i in $(seq 1 10); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "http://$EC2_HOST/") || true
-            echo "HTTP $code"
+            # HTTPS 가 켜져 있으면 http → https 리다이렉트를 따라가 인증서까지 검증한다
+            code=$(curl -s -L -o /dev/null -w '%{http_code} %{url_effective}' "http://$EC2_HOST/") || true
+            echo "$code"
+            code=${code%% *}
             [ "$code" = "200" ] && exit 0
             sleep 3
           done
